@@ -23,7 +23,7 @@ Architecture principles:
 
 bash
 ## clone (if not already)
-git clone git@github.com:<github-owner>/<repo>.git
+git clone git@github.com:AlexTouvras/MagicMirror.git
 cd <repo>
 
 ## start stack (uses docker compose v2)
