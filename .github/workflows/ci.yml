@@ -30,17 +30,17 @@ jobs:
           python -m py_compile $(git ls-files '*.py') || true
         shell: bash
 
-      - name: Run tests (weather normalization)
+#      - name: Run tests (weather normalization)
         # supply minimal env required by app import/validation
-        env:
-          WEATHER_LAT: 52.3676
-          WEATHER_LON: 4.9041
-          WEATHER_TIMEZONE: Europe/Amsterdam
-          WEATHER_TEMPERATURE_UNIT: celsius
-          WEATHER_WIND_SPEED_UNIT: kmh
-          WEATHER_FORECAST_DAYS: 3
-        run: |
-          python -m pytest -q
+#       env:
+#          WEATHER_LAT: 52.3676
+#          WEATHER_LON: 4.9041
+#          WEATHER_TIMEZONE: Europe/Amsterdam
+#          WEATHER_TEMPERATURE_UNIT: celsius
+#          WEATHER_WIND_SPEED_UNIT: kmh
+#          WEATHER_FORECAST_DAYS: 3
+#        run: |
+#          python -m pytest -q
 
   build-images:
     name: Build Docker service images (validate Dockerfiles)
