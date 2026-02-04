@@ -4,7 +4,7 @@ Smart, small, and resilient backend for the Magic Mirror project (Raspberry Pi).
 This repo contains the headless, containerized backend services (time and weather)
 designed to run on constrained hardware with an emphasis on reliability and DevOps.
 
-[![CI](https://github.com/<github-owner>/<repo>/actions/workflows/ci.yml/badge.svg)](https://github.com/<github-owner>/<repo>/actions/workflows/ci.yml)
+[![CI](https://github.com/AlexTouvras/MagicMirror/actions/workflows/ci.yml/badge.svg)](https://github.com/AlexTouvras/MagicMirror/actions/workflows/ci.yml)
 
 ## Overview
 
@@ -21,20 +21,32 @@ Architecture principles:
 
 ## Quick start (on the Pi)
 
-\`\`\`bash
-# clone (if not already)
-git clone git@github.com:<github-owner>/<repo>.git
+bash
+## clone (if not already)
+git clone git@github.com:AlexTouvras/MagicMirror.git
 cd <repo>
 
-# start stack (uses docker compose v2)
+## start stack (uses docker compose v2)
 docker compose up -d --build
 
-# check services
+## check services
 curl http://localhost:8010/health    # time-service
 curl http://localhost:8020/health    # weather-service
 curl http://localhost:8020/forecast  # minimal forecast
 curl http://localhost:8020/forecast/summary
-\`\`\`
+
+or 
+
+python3 - <<'PY'
+import urllib.request, json
+print(urllib.request.urlopen("http://localhost:8010/health", timeout=5).read().decode())
+print("-----")
+print(urllib.request.urlopen("http://localhost:8020/health", timeout=5).read().decode())
+print("-----")
+print(urllib.request.urlopen("http://localhost:8020/forecast", timeout=20).read().decode()[:800])
+print("-----")
+print(urllib.request.urlopen("http://localhost:8020/forecast/summary", timeout=20).read().decode()[:800])
+PY
 
 ## Project layout
 
