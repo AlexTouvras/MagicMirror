@@ -1,0 +1,297 @@
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import JSONResponse
+import os, time, json, urllib.parse, urllib.request, ssl, sys, traceback
+from pathlib import Path
+from typing import Any, Dict, Tuple, List
+from datetime import datetime, timezone, timedelta
+
+# --- startup env validation: fail fast on invalid WEATHER_* config ---
+def _validate_env():
+    import sys
+    errors = []
+    # lat / lon
+    try:
+        lat = float(os.getenv('WEATHER_LAT', '').strip())
+        lon = float(os.getenv('WEATHER_LON', '').strip())
+        if not (-90 <= lat <= 90):
+            errors.append(f"WEATHER_LAT out of range: {lat}")
+        if not (-180 <= lon <= 180):
+            errors.append(f"WEATHER_LON out of range: {lon}")
+    except Exception:
+        errors.append('WEATHER_LAT/WEATHER_LON must be set to valid floats (e.g. 52.36, 4.90)')
+
+    # timezone: simple IANA-style sanity check
+    tz = os.getenv('WEATHER_TIMEZONE', '').strip()
+    if not tz or '/' not in tz:
+        errors.append('WEATHER_TIMEZONE must be a valid IANA timezone (e.g. Europe/Amsterdam)')
+
+    # temperature unit
+    tu = os.getenv('WEATHER_TEMPERATURE_UNIT', 'celsius').strip().lower()
+    if tu not in ('celsius','fahrenheit'):
+        errors.append(f'WEATHER_TEMPERATURE_UNIT invalid: {tu} (allowed: celsius, fahrenheit)')
+
+    # wind speed unit
+    wu = os.getenv('WEATHER_WIND_SPEED_UNIT', 'kmh').strip().lower()
+    if wu not in ('kmh','ms','mph'):
+        errors.append(f'WEATHER_WIND_SPEED_UNIT invalid: {wu} (allowed: kmh, ms, mph)')
+
+    # forecast days
+    try:
+        days = int(os.getenv('WEATHER_FORECAST_DAYS', '7'))
+        if not (1 <= days <= 16):
+            errors.append('WEATHER_FORECAST_DAYS must be between 1 and 16')
+    except Exception:
+        errors.append('WEATHER_FORECAST_DAYS must be an integer')
+
+    # short-circuit on obvious absence of lat/lon/timezone
+    if errors:
+        for e in errors:
+            print('CONFIG_ERROR:', e, file=sys.stderr, flush=True)
+        raise RuntimeError('Invalid WEATHER_* env configuration (see CONFIG_ERROR in logs)')
+# run validation immediately on import/startup
+_validate_env()
+# --- end validation block ---
+
+
+# === persistent cache helpers ===
+_CACHE_FILE = os.getenv("WEATHER_CACHE_FILE", "pi/smart-mirror-backend/data/weather_cache.json")
+
+def _load_persistent_cache():
+    try:
+        p = Path(_CACHE_FILE)
+        if not p.exists():
+            return
+        txt = p.read_text()
+        data = json.loads(txt or "{}")
+        # expected shape: {"url": "...", "payload": {...}, "fetched_at": 167...}
+        url = data.get("url")
+        payload = data.get("payload")
+        fetched_at = data.get("fetched_at")
+        if url and payload and fetched_at:
+            _CACHE[url] = (float(fetched_at), payload)
+            print(f"Loaded cache from {_CACHE_FILE} for url={url}", file=sys.stderr, flush=True)
+    except Exception as e:
+        print("Failed to load persistent cache:", e, file=sys.stderr, flush=True)
+
+def _save_persistent_cache(url: str, payload: Dict[str, Any], fetched_at: float = None):
+    try:
+        obj = {"url": url, "payload": payload, "fetched_at": fetched_at or time.time()}
+        Path(_CACHE_FILE).write_text(json.dumps(obj))
+    except Exception as e:
+        print("Failed to save persistent cache:", e, file=sys.stderr, flush=True)
+
+# call loader at import/startup
+_load_persistent_cache()
+
+app = FastAPI(title="weather-service-minimal")
+
+_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+
+def _get_env(name: str, default: str = "") -> str:
+    return os.getenv(name, default).strip()
+
+def _get_float(name: str) -> float:
+    raw = _get_env(name)
+    if not raw:
+        raise ValueError(f"Missing env var: {name}")
+    return float(raw)
+
+def _get_int(name: str, default: int) -> int:
+    raw = _get_env(name)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+def _ttl_seconds() -> int:
+    return max(30, min(_get_int("WEATHER_CACHE_TTL_SECONDS", 600), 24*3600))
+
+def _build_url(days: int, hours: int) -> str:
+    lat = _get_float("WEATHER_LAT")
+    lon = _get_float("WEATHER_LON")
+    tz = _get_env("WEATHER_TIMEZONE", "auto") or "auto"
+
+    hourly = ",".join(["temperature_2m", "precipitation", "weather_code"])
+    daily = ",".join(["temperature_2m_max", "temperature_2m_min", "precipitation_sum", "weather_code"])
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "timezone": tz,
+        "hourly": hourly,
+        "daily": daily,
+        "forecast_days": days,
+        "forecast_hours": hours,
+        "timeformat": "iso8601",
+    }
+    return OPEN_METEO_FORECAST_URL + "?" + urllib.parse.urlencode(params, safe=",")
+
+def _fetch_json(url: str) -> Dict[str, Any]:
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "smart-mirror-backend/1.0 (weather-service-minimal)",
+        "Accept": "application/json",
+    })
+    ctx = ssl.create_default_context()
+    try:
+        with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.request.HTTPError as he:
+        try:
+            body = he.read().decode()
+        except Exception:
+            body = "<no body>"
+        raise Exception(f"UPSTREAM_HTTP_ERROR code={he.code} reason={he.reason} body={body}")
+    except Exception as e:
+        raise Exception(f"UPSTREAM_EXCEPTION: {repr(e)}")
+
+def _normalize_open_meteo_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    # current (best-effort)
+    current = {}
+    if payload.get("current_weather"):
+        current = payload["current_weather"]
+    else:
+        # fall back to first hourly point
+        hour_time = payload.get("hourly", {}).get("time", [])
+        if hour_time:
+            i = 0
+            current = {
+                "time": hour_time[0],
+                "temperature_2m": payload.get("hourly", {}).get("temperature_2m", [None])[0],
+                "precipitation": payload.get("hourly", {}).get("precipitation", [None])[0],
+                "weather_code": payload.get("hourly", {}).get("weather_code", [None])[0],
+            }
+
+    # hourly list of dicts
+    hourly = []
+    h = payload.get("hourly", {})
+    times = h.get("time", [])
+    temps = h.get("temperature_2m", [])
+    prec = h.get("precipitation", [])
+    wcode = h.get("weather_code", [])
+    for idx, t in enumerate(times):
+        hourly.append({
+            "time": t,
+            "temperature_2m": temps[idx] if idx < len(temps) else None,
+            "precipitation": prec[idx] if idx < len(prec) else None,
+            "weather_code": wcode[idx] if idx < len(wcode) else None,
+        })
+
+    # daily list of dicts
+    daily = []
+    d = payload.get("daily", {})
+    dtime = d.get("time", [])
+    tmax = d.get("temperature_2m_max", [])
+    tmin = d.get("temperature_2m_min", [])
+    dprec = d.get("precipitation_sum", [])
+    dcode = d.get("weather_code", [])
+    for idx, dt in enumerate(dtime):
+        daily.append({
+            "date": dt,
+            "temp_max": tmax[idx] if idx < len(tmax) else None,
+            "temp_min": tmin[idx] if idx < len(tmin) else None,
+            "precipitation_sum": dprec[idx] if idx < len(dprec) else None,
+            "weather_code": dcode[idx] if idx < len(dcode) else None,
+        })
+
+    return {"current": current, "hourly": hourly, "daily": daily, "timezone": payload.get("timezone")}
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "service": "weather-service-minimal",
+        "version": _get_env("SERVICE_VERSION", "dev"),
+        "lat": _get_env("WEATHER_LAT", "unset"),
+        "lon": _get_env("WEATHER_LON", "unset"),
+        "timezone": _get_env("WEATHER_TIMEZONE", "unset"),
+        "forecast_days_default": _get_env("WEATHER_FORECAST_DAYS", "7"),
+        "forecast_hours_default": _get_env("WEATHER_FORECAST_HOURS", "24"),
+        "cache_ttl_seconds": _ttl_seconds(),
+    }
+
+@app.get("/forecast")
+def forecast(days: int | None = Query(default=None, ge=1, le=16), hours: int | None = Query(default=None, ge=1, le=384)):
+    d = days if days is not None else _get_int("WEATHER_FORECAST_DAYS", 3)
+    h = hours if hours is not None else _get_int("WEATHER_FORECAST_HOURS", 24)
+
+    url = _build_url(days=d, hours=h)
+    key = url
+    ttl = _ttl_seconds()
+    now = time.time()
+    cached = _CACHE.get(key)
+    if cached:
+        fetched_at, payload = cached
+        if now - fetched_at <= ttl:
+            return {"provider": "open-meteo", "cached": True, "fetched_at": int(fetched_at), "data": _normalize_open_meteo_payload(payload)}
+
+    try:
+        payload = _fetch_json(url)
+    except Exception as e:
+        tb = traceback.format_exc()
+        # debug-friendly response
+        return JSONResponse(status_code=502, content={"error": "upstream_exception", "message": str(e), "url": url, "trace_snippet": tb[:1200]})
+    _save_persistent_cache(url, payload, now)
+    _CACHE[key] = (now, payload)
+    return {"provider": "open-meteo", "cached": False, "fetched_at": int(now), "data": _normalize_open_meteo_payload(payload)}
+
+@app.get("/forecast/summary")
+def forecast_summary(hours: int | None = 6, days: int | None = 5):
+    """
+    Returns a compact UI-friendly summary:
+      - next `hours` hourly entries (time, temp, precip, weather_code)
+      - next `days` daily entries (date, temp_max, temp_min, precipitation_sum, weather_code)
+    """
+    try:
+        # reuse forecast handler logic via direct call (no HTTP)
+        resp = forecast(days=days, hours=hours)
+        # if resp is a FastAPI Response (JSONResponse due to upstream exception), forward it
+        if isinstance(resp, JSONResponse):
+            return resp
+
+        data = resp.get("data") if isinstance(resp, dict) else resp
+        if not data:
+            raise HTTPException(status_code=502, detail="No data available")
+
+        hourly = data.get("hourly", [])
+        daily = data.get("daily", [])
+
+        # take the first `hours` hourly points
+        hourly_summary = []
+        for i, h in enumerate(hourly[:hours]):
+            hourly_summary.append({
+                "time": h.get("time"),
+                "temperature_2m": h.get("temperature_2m"),
+                "precipitation": h.get("precipitation"),
+                "weather_code": h.get("weather_code"),
+            })
+
+        # take the first `days` daily points
+        daily_summary = []
+        for i, d in enumerate(daily[:days]):
+            daily_summary.append({
+                "date": d.get("date"),
+                "temp_max": d.get("temp_max"),
+                "temp_min": d.get("temp_min"),
+                "precipitation_sum": d.get("precipitation_sum"),
+                "weather_code": d.get("weather_code"),
+            })
+
+        # simple meta for UI
+        generated_at = int(time.time())
+        tz = data.get("timezone", os.getenv("WEATHER_TIMEZONE", "unset"))
+
+        return {
+            "provider": "open-meteo",
+            "generated_at": generated_at,
+            "timezone": tz,
+            "hourly_count": len(hourly_summary),
+            "daily_count": len(daily_summary),
+            "hourly": hourly_summary,
+            "daily": daily_summary,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"summary_error: {e}")

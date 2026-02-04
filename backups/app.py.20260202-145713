@@ -1,0 +1,204 @@
+from fastapi import FastAPI, HTTPException, Query
+import os
+import time
+import json
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any, Dict, Tuple
+import socket
+
+app = FastAPI(title="weather-service")
+
+# key -> (fetched_epoch_seconds, response_json)
+_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+
+OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+
+def _read_secret_file(path: str) -> str:
+    if not path:
+        return ""
+    try:
+        return Path(path).read_text().strip()
+    except Exception:
+        return ""
+
+def _api_key_configured() -> bool:
+    # For future providers that require keys.
+    key_file = os.getenv("WEATHER_API_KEY_FILE", "")
+    if key_file:
+        return bool(_read_secret_file(key_file))
+    return bool(os.getenv("WEATHER_API_KEY", "").strip())
+
+def _provider() -> str:
+    return os.getenv("WEATHER_PROVIDER", "open-meteo").strip().lower()
+
+def _get_float(name: str) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        raise ValueError(f"Missing env var: {name}")
+    return float(raw)
+
+def _get_int(name: str, default: int, *, min_v: int | None = None, max_v: int | None = None) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        v = default
+    else:
+        try:
+            v = int(raw)
+        except ValueError:
+            v = default
+    if min_v is not None:
+        v = max(min_v, v)
+    if max_v is not None:
+        v = min(max_v, v)
+    return v
+
+def _ttl_seconds() -> int:
+    return _get_int("WEATHER_CACHE_TTL_SECONDS", 900, min_v=30, max_v=24 * 3600)
+
+def _build_open_meteo_url(days: int, hours: int) -> str:
+    lat = _get_float("WEATHER_LAT")
+    lon = _get_float("WEATHER_LON")
+    tz = os.getenv("WEATHER_TIMEZONE", "auto").strip() or "auto"
+
+    # Variable names come straight from Open‑Meteo docs. :contentReference[oaicite:4]{index=4}
+    hourly_vars = [
+        "temperature_2m",
+        "precipitation_probability",
+        "precipitation",
+        "weather_code",
+        "wind_speed_10m",
+        "wind_gusts_10m",
+        "is_day",
+    ]
+
+    daily_vars = [
+        "weather_code",
+        "temperature_2m_max",
+        "temperature_2m_min",
+        "precipitation_sum",
+        "precipitation_probability_max",
+        "sunrise",
+        "sunset",
+        "wind_speed_10m_max",
+        "wind_gusts_10m_max",
+    ]
+
+    current_vars = [
+        "temperature_2m",
+        "weather_code",
+        "wind_speed_10m",
+        "wind_direction_10m",
+        "is_day",
+        "precipitation",
+    ]
+
+    params: Dict[str, Any] = {
+        "latitude": lat,
+        "longitude": lon,
+        "timezone": tz,
+        "hourly": ",".join(hourly_vars),
+        "daily": ",".join(daily_vars),
+        "current": ",".join(current_vars),
+        "forecast_days": days,     # up to 16 :contentReference[oaicite:5]{index=5}
+        "forecast_hours": hours,   # limits hourly range :contentReference[oaicite:6]{index=6}
+        # Units / formatting
+        "temperature_unit": os.getenv("WEATHER_TEMPERATURE_UNIT", "celsius").strip(),
+        "wind_speed_unit": os.getenv("WEATHER_WIND_SPEED_UNIT", "kmh").strip(),
+        "precipitation_unit": os.getenv("WEATHER_PRECIPITATION_UNIT", "mm").strip(),
+        "timeformat": os.getenv("WEATHER_TIMEFORMAT", "iso8601").strip(),
+    }
+
+    models = os.getenv("WEATHER_MODELS", "").strip()
+    if models:
+        # Default is "auto" per docs; sending it explicitly is fine. :contentReference[oaicite:7]{index=7}
+        params["models"] = models
+
+    query = urllib.parse.urlencode(params, safe=",")
+    return f"{OPEN_METEO_FORECAST_URL}?{query}"
+
+def _cache_key(url: str) -> str:
+    # URL fully captures lat/lon/vars/units/ranges, so it's a good cache key.
+    return url
+
+def _fetch_json(url: str) -> Dict[str, Any]:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "smart-mirror-backend/1.0 (weather-service)",
+            "Accept": "application/json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        body = resp.read().decode("utf-8")
+    return json.loads(body)
+
+@app.get("/health")
+def health():
+    provider = _provider()
+    key_required = provider not in ("open-meteo", "open_meteo", "openmeteo")
+    return {
+        "status": "ok",
+        "service": "weather-service",
+        "version": os.getenv("SERVICE_VERSION", "dev"),
+        "provider": provider,
+        "api_key_required": key_required,
+        "api_key_configured": True if not key_required else _api_key_configured(),
+        "lat": os.getenv("WEATHER_LAT", "unset"),
+        "lon": os.getenv("WEATHER_LON", "unset"),
+        "timezone": os.getenv("WEATHER_TIMEZONE", "unset"),
+        "forecast_days_default": os.getenv("WEATHER_FORECAST_DAYS", "unset"),
+        "forecast_hours_default": os.getenv("WEATHER_FORECAST_HOURS", "unset"),
+        "cache_ttl_seconds": _ttl_seconds(),
+    }
+
+@app.get("/forecast")
+def forecast(
+    days: int | None = Query(default=None, ge=1, le=16),
+    hours: int | None = Query(default=None, ge=1, le=384),
+):
+    provider = _provider()
+    if provider not in ("open-meteo", "open_meteo", "openmeteo"):
+        raise HTTPException(status_code=400, detail=f"Provider not implemented: {provider}")
+
+    # Defaults from env, but allow query overrides.
+    d = days if days is not None else _get_int("WEATHER_FORECAST_DAYS", 7, min_v=1, max_v=16)
+    h = hours if hours is not None else _get_int("WEATHER_FORECAST_HOURS", 48, min_v=1, max_v=384)
+
+    url = _build_open_meteo_url(days=d, hours=h)
+    key = _cache_key(url)
+    ttl = _ttl_seconds()
+
+    # caching: return cached payload if within ttl
+    now = time.time()
+    cached = _CACHE.get(key)
+    if cached:
+        fetched_at, payload = cached
+        age = now - fetched_at
+        if age <= ttl:
+            return {
+                "provider": "open-meteo",
+                "generated_at": int(now),
+                "cache": {"hit": True, "age_seconds": int(age), "ttl_seconds": ttl},
+                "request": {"days": d, "hours": h},
+                "data": payload,
+            }
+
+    # fetch upstream
+    try:
+        payload = _fetch_json(url)
+    except Exception as e:
+        # surface a 502 with the upstream error message
+        raise HTTPException(status_code=502, detail=f"Open-Meteo request failed: {e}")
+
+    # store in cache and return
+    _CACHE[key] = (now, payload)
+
+    return {
+        "provider": "open-meteo",
+        "generated_at": int(now),
+        "cache": {"hit": False, "age_seconds": 0, "ttl_seconds": ttl},
+        "request": {"days": d, "hours": h},
+        "data": payload,
+    }

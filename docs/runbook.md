@@ -53,3 +53,10 @@ Recommended deploy flow:
 2) docker compose build 
 3) docker compose up -d --remove-orphans 
 4) verify /health endpoints 
+
+## Persistent cache for Weather Service
+
+- Cache file: ./data/weather_cache.json
+- Refresher: systemd timer `weather-cache-refresh.timer` (every 15 minutes)
+- To force refresh: sudo systemctl start weather-cache-refresh.service
+- Cache file is read on service startup into in-memory cache

@@ -1,14 +1,43 @@
 services:
   time-service:
-    build: ./services/time-service
+    build:
+      context: ./services/time-service
     container_name: time-service
+    ports:
+      - "8010:8000"
+    env_file:
+      - .env
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   weather-service:
-    build: ./services/weather-service
+    volumes:
+      - .data:/data:rw
+    environment:
+      WEATHER_API_KEY_FILE: /run/secrets/WEATHER_API_KEY
+      WEATHER_CACHE_FILE: /data/weather_cache.json
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    build:
+      context: ./services/weather-service
     container_name: weather-service
+    ports:
+      - "8020:8000"
+    env_file:
+      - .env
+    secrets:
+      - WEATHER_API_KEY
     restart: unless-stopped
-
-  chatgpt-quote-service:
-    image: alpine
-    command: sh -c "while true; do echo 'Quote placeholder'; sleep 60; done"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+secrets:
+    WEATHER_API_KEY:
+      file: ./secrets/WEATHER_API_KEY

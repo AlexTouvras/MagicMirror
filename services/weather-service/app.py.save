@@ -1,0 +1,47 @@
+from fastapi import FastAPI
+import os
+from pathlib import Path
+
+app = FastAPI(title="weather-service")
+
+def _read_secret_file(path: str) -> str:
+    if not path:
+        return""
+    try:
+        return Path(path).read_text().strip()
+    except FileNotFoundError:
+        return ""
+   except PermissionError:
+        return ""
+    except Exception:
+        return ""
+
+def api_key_configured() -> bool:
+    # Preferred path: secret file mounted by Docker Compose secretsfrom fastapi import FastAPI
+    key_file = os.getenv("WEATHER_API_KEY", "").strip())
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "service": "weather-service",
+        "version": os.getenv("SERVICE_VERSION", "dev"),
+        "provider": os.getenv("WEATHER_PROVIDER", "unset"),
+        "location": os.getenv("WEATHER_LOCATION", "unset"),
+        "units": os.getenv("WEATHER_UNITS", "unset"),
+        "api_key_configured":
+
+
+
+
+import os
+
+app = FastAPI(title="weather-service")
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "service": "weather-service",
+        "version": os.getenv("SERVICE_VERSION", "dev"),
+    }
