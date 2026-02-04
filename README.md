@@ -4,7 +4,7 @@ Smart, small, and resilient backend for the Magic Mirror project (Raspberry Pi).
 This repo contains the headless, containerized backend services (time and weather)
 designed to run on constrained hardware with an emphasis on reliability and DevOps.
 
-[![CI](https://github.com/<github-owner>/<repo>/actions/workflows/ci.yml/badge.svg)](https://github.com/<github-owner>/<repo>/actions/workflows/ci.yml)
+[![CI](https://github.com/AlexTouvras/MagicMirror/actions/workflows/ci.yml/badge.svg)](https://github.com/AlexTouvras/MagicMirror/actions/workflows/ci.yml)
 
 ## Overview
 
