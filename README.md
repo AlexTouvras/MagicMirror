@@ -35,6 +35,18 @@ curl http://localhost:8020/health    # weather-service
 curl http://localhost:8020/forecast  # minimal forecast
 curl http://localhost:8020/forecast/summary
 
+or 
+
+python3 - <<'PY'
+import urllib.request, json
+print(urllib.request.urlopen("http://localhost:8010/health", timeout=5).read().decode())
+print("-----")
+print(urllib.request.urlopen("http://localhost:8020/health", timeout=5).read().decode())
+print("-----")
+print(urllib.request.urlopen("http://localhost:8020/forecast", timeout=20).read().decode()[:800])
+print("-----")
+print(urllib.request.urlopen("http://localhost:8020/forecast/summary", timeout=20).read().decode()[:800])
+PY
 
 ## Project layout
 
