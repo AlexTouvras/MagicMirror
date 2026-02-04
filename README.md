@@ -21,7 +21,7 @@ Architecture principles:
 
 ## Quick start (on the Pi)
 
-\`\`\`bash
+bash
 ## clone (if not already)
 git clone git@github.com:<github-owner>/<repo>.git
 cd <repo>
@@ -34,7 +34,7 @@ curl http://localhost:8010/health    # time-service
 curl http://localhost:8020/health    # weather-service
 curl http://localhost:8020/forecast  # minimal forecast
 curl http://localhost:8020/forecast/summary
-\`\`\`
+
 
 ## Project layout
 
