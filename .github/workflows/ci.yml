@@ -1,6 +1,5 @@
 name: CI
-pip install -r requirements-dev.txt
-pip install fastapi
+
 on:
   push:
     branches: ["main"]
