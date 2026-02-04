@@ -22,14 +22,14 @@ Architecture principles:
 ## Quick start (on the Pi)
 
 \`\`\`bash
-# clone (if not already)
+## clone (if not already)
 git clone git@github.com:<github-owner>/<repo>.git
 cd <repo>
 
-# start stack (uses docker compose v2)
+## start stack (uses docker compose v2)
 docker compose up -d --build
 
-# check services
+## check services
 curl http://localhost:8010/health    # time-service
 curl http://localhost:8020/health    # weather-service
 curl http://localhost:8020/forecast  # minimal forecast
