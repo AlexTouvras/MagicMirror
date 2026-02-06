@@ -60,3 +60,21 @@ Recommended deploy flow:
 - Refresher: systemd timer `weather-cache-refresh.timer` (every 15 minutes)
 - To force refresh: sudo systemctl start weather-cache-refresh.service
 - Cache file is read on service startup into in-memory cache
+
+## 1.4 — Service autostart & recovery (CLOSED)
+
+- systemd timer `weather-cache-refresh.timer` installed on host to warm cache.
+- Cache file mounted into container at `./data/weather_cache.json`.
+- Docker Compose set up with service restart policy (restart: unless-stopped).
+- Weather service validated to fail-fast on invalid config.
+- Recovery test: container restart verified manually (killed & auto restarted).
+
+To force a cache refresh on the host:
+  sudo systemctl start weather-cache-refresh.service
+
+To force a service restart (container):
+  docker compose restart weather-service
+
+To view logs:
+  docker compose logs -f weather-service
+
